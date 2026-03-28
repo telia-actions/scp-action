@@ -60,8 +60,8 @@ func main() {
 	targetConfig := &ssh.ClientConfig{
 		Timeout:         timeout,
 		User:            os.Getenv("USERNAME"),
-		Auth:            ConfigureAuthentication(os.Getenv("KEY"), os.Getenv("INSECURE_PASSWORD")),
-		HostKeyCallback: VerifyFingerprint(os.Getenv("FINGERPRINT")),
+		Auth:            ConfigureAuthentication(os.Getenv("KEY"), os.Getenv("PASSPHRASE"), os.Getenv("INSECURE_PASSWORD")),
+		HostKeyCallback: ConfigureHostKeyCallback(os.Getenv("FINGERPRINT"), os.Getenv("INSECURE_IGNORE_FINGERPRINT")),
 	}
 
 	// Configure target address.
@@ -76,8 +76,8 @@ func main() {
 		proxyConfig := &ssh.ClientConfig{
 			Timeout:         timeout,
 			User:            os.Getenv("PROXY_USERNAME"),
-			Auth:            ConfigureAuthentication(os.Getenv("PROXY_KEY"), os.Getenv("INSECURE_PROXY_PASSWORD")),
-			HostKeyCallback: VerifyFingerprint(os.Getenv("PROXY_FINGERPRINT")),
+			Auth:            ConfigureAuthentication(os.Getenv("PROXY_KEY"), os.Getenv("PROXY_PASSPHRASE"), os.Getenv("INSECURE_PROXY_PASSWORD")),
+			HostKeyCallback: ConfigureHostKeyCallback(os.Getenv("PROXY_FINGERPRINT"), os.Getenv("INSECURE_PROXY_IGNORE_FINGERPRINT")),
 		}
 
 		// Establish SSH session to proxy host.
@@ -108,18 +108,6 @@ func main() {
 	defer targetClient.Close()
 
 	Copy(targetClient)
-}
-
-// VerifyFingerprint takes an ssh key fingerprint as an argument and verifies it against and SSH public key.
-func VerifyFingerprint(expected string) ssh.HostKeyCallback {
-	return func(hostname string, remote net.Addr, pubKey ssh.PublicKey) error {
-		fingerprint := ssh.FingerprintSHA256(pubKey)
-		if fingerprint != expected {
-			return errors.New("fingerprint mismatch: server fingerprint: " + fingerprint)
-		}
-
-		return nil
-	}
 }
 
 // Copy transfers files between remote host and local machine.
@@ -168,11 +156,20 @@ func Copy(client *ssh.Client) {
 }
 
 // ConfigureAuthentication configures the authentication method.
-func ConfigureAuthentication(key string, password string) []ssh.AuthMethod {
+func ConfigureAuthentication(key string, passphrase string, password string) []ssh.AuthMethod {
 	// Create signer for public key authentication method.
 	auth := make([]ssh.AuthMethod, 1)
+
 	if key != "" {
-		targetSigner, err := ssh.ParsePrivateKey([]byte(key))
+		var err error
+		var targetSigner ssh.Signer
+
+		if passphrase != "" {
+			targetSigner, err = ssh.ParsePrivateKeyWithPassphrase([]byte(key), []byte(passphrase))
+		} else {
+			targetSigner, err = ssh.ParsePrivateKey([]byte(key))
+		}
+
 		if err != nil {
 			log.Fatalf("❌ Failed to parse private key: %v", err)
 		}
@@ -189,4 +186,25 @@ func ConfigureAuthentication(key string, password string) []ssh.AuthMethod {
 	}
 
 	return auth
+}
+
+// ConfigureHostKeyCallback configures the SSH host key verification callback.
+// Unless the `skip` option is set to `string("true")` it will return a function,
+// which verifies the host key against the specified ssh key fingerprint.
+func ConfigureHostKeyCallback(expected string, skip string) ssh.HostKeyCallback {
+	if skip == "true" {
+		log.Println("⚠️ Skipping host key verification is insecure!")
+		log.Println("⚠️ This allows for person-in-the-middle attacks!")
+		log.Println("⚠️ Please consider using host key verification!")
+		return ssh.InsecureIgnoreHostKey()
+	}
+
+	return func(hostname string, remote net.Addr, pubKey ssh.PublicKey) error {
+		fingerprint := ssh.FingerprintSHA256(pubKey)
+		if fingerprint != expected {
+			return errors.New("fingerprint mismatch: server fingerprint: " + fingerprint)
+		}
+
+		return nil
+	}
 }
